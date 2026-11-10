@@ -2219,6 +2219,7 @@ export class PocketWorldController {
     multiplier?: number;
     planetName?: string;
     watermark?: boolean;
+    download?: boolean;
   } = {}): Promise<{ dataUrl: string; filename: string }> {
     const multiplier = options.multiplier || 2;
     const name = options.planetName || 'Terrarium Planet';
@@ -2295,12 +2296,14 @@ export class PocketWorldController {
     const cleanName = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_') || 'pocket_world';
     const filename = `${cleanName}_snapshot_${Date.now()}.png`;
 
-    const link = document.createElement('a');
-    link.download = filename;
-    link.href = dataUrl;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    if (options.download !== false) {
+      const link = document.createElement('a');
+      link.download = filename;
+      link.href = dataUrl;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    }
 
     return { dataUrl, filename };
   }

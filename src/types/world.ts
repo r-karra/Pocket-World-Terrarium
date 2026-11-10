@@ -449,12 +449,20 @@ export type JournalCategory =
   | 'record'
   | 'note';
 
+export type JournalTag =
+  | 'Milestone'
+  | 'Event'
+  | 'Discovery'
+  | 'Record'
+  | 'Observation';
+
 export interface JournalEntry {
   id: string;
   category: JournalCategory;
   title: string;
   description: string;
   badge: string;
+  tags?: string[];
   iconName: string;
   accentColor: string;
   dayCount: number;
@@ -480,5 +488,14 @@ export interface JournalStats {
   firstNightfallRecorded: boolean;
   firstSnapshotRecorded: boolean;
   firstCelestialTransitionRecorded: boolean;
+}
+
+export interface JournalExportData {
+  version: 1;
+  app: string;
+  exportedAt: string;
+  planetName: string;
+  entries: JournalEntry[];
+  stats: JournalStats;
 }
 

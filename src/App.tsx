@@ -4,6 +4,8 @@ import {
   ArrowDownToLine,
   ArrowUpFromLine,
   Bird,
+  BookMarked,
+  BookOpen,
   Bug,
   Camera,
   Castle,
@@ -39,9 +41,14 @@ import {
   Wind,
   X,
 } from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
 import { PocketWorldController } from './three/PocketWorldScene';
+import { JournalOverlay } from './components/JournalOverlay';
+import { MilestoneBadge } from './components/MilestoneBadge';
 import {
   CameraViewId,
+  JournalEntry,
+  JournalStats,
   SeasonId,
   SEASONS,
   TimeMode,
@@ -52,6 +59,12 @@ import {
   WeatherMode,
   WorldState,
 } from './types/world';
+import {
+  evaluateMilestone,
+  loadJournalData,
+  MilestoneContext,
+  saveJournalData,
+} from './utils/journalManager';
 
 function renderWeatherOptionIcon(name: string, cls = 'w-3.5 h-3.5 shrink-0') {
   switch (name) {
@@ -236,12 +249,67 @@ export default function App() {
   const [snapshotQuality, setSnapshotQuality] = useState<'2k' | '4k'>('2k');
   const [snapshotWatermark, setSnapshotWatermark] = useState(true);
 
+  // Journal & Chronicle state
+  const [journalOpen, setJournalOpen] = useState(false);
+  const [unreadJournalCount, setUnreadJournalCount] = useState(0);
+  const [journalToast, setJournalToast] = useState<JournalEntry | null>(null);
+  const [journalData, setJournalData] = useState(() =>
+    loadJournalData(worldState.planetName || 'Little Meadow'),
+  );
+
+  const journalEntriesRef = useRef(journalData.entries);
+  const journalStatsRef = useRef(journalData.stats);
+  const journalOpenRef = useRef(journalOpen);
+  const planetNameRef = useRef(worldState.planetName);
+
+  useEffect(() => {
+    journalEntriesRef.current = journalData.entries;
+    journalStatsRef.current = journalData.stats;
+  }, [journalData]);
+
+  useEffect(() => {
+    journalOpenRef.current = journalOpen;
+    if (journalOpen) {
+      setUnreadJournalCount(0);
+      setJournalToast(null);
+    }
+  }, [journalOpen]);
+
+  useEffect(() => {
+    planetNameRef.current = worldState.planetName;
+  }, [worldState.planetName]);
+
   useEffect(() => {
     const container = mountRef.current;
     if (!container) return;
 
     const controller = new PocketWorldController(container, setWorldState);
     controllerRef.current = controller;
+
+    // Attach Milestone listener to record significant world events in the Journal
+    controller.setOnMilestoneCallback((ctx: MilestoneContext) => {
+      const result = evaluateMilestone(
+        { ...ctx, planetName: planetNameRef.current },
+        journalEntriesRef.current,
+        journalStatsRef.current,
+      );
+      if (result) {
+        const updatedEntries = [result.newEntry, ...journalEntriesRef.current];
+        const updatedStats = result.updatedStats;
+        journalEntriesRef.current = updatedEntries;
+        journalStatsRef.current = updatedStats;
+        setJournalData({ entries: updatedEntries, stats: updatedStats });
+        saveJournalData(planetNameRef.current, updatedEntries, updatedStats);
+
+        if (!journalOpenRef.current) {
+          setUnreadJournalCount((c) => c + 1);
+          setJournalToast(result.newEntry);
+          setTimeout(() => {
+            setJournalToast((t) => (t?.id === result.newEntry.id ? null : t));
+          }, 4800);
+        }
+      }
+    });
 
     const canvas = container.querySelector('canvas');
     const onContextLost = (e: Event) => {
@@ -291,21 +359,44 @@ export default function App() {
     }
   };
 
+  const handleCaptureSceneSnapshotDataUrl = async (): Promise<string | null> => {
+    if (!controllerRef.current) return null;
+    try {
+      const res = await controllerRef.current.captureSnapshot({
+        multiplier: 1.5,
+        planetName: worldState.planetName,
+        watermark: false,
+        download: false,
+      });
+      return res.dataUrl;
+    } catch (e) {
+      console.warn('Failed to capture scene snapshot for chronicle card:', e);
+      return null;
+    }
+  };
+
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       const isInput = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA';
 
-      if (e.key === 'Escape' && filtersOpen) {
-        setFiltersOpen(false);
+      if (e.key === 'Escape') {
+        if (journalOpen) {
+          setJournalOpen(false);
+        } else if (filtersOpen) {
+          setFiltersOpen(false);
+        }
       } else if ((e.key === 's' || e.key === 'S') && !isInput && !e.metaKey && !e.ctrlKey) {
         e.preventDefault();
         handleCaptureSnapshot();
+      } else if ((e.key === 'j' || e.key === 'J') && !isInput && !e.metaKey && !e.ctrlKey) {
+        e.preventDefault();
+        setJournalOpen((prev) => !prev);
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [filtersOpen, isCapturingSnapshot, snapshotQuality, snapshotWatermark, worldState.planetName]);
+  }, [journalOpen, filtersOpen, isCapturingSnapshot, snapshotQuality, snapshotWatermark, worldState.planetName]);
 
   const handleSelectTool = (tool: ToolId) => {
     controllerRef.current?.setTool(tool);
@@ -498,8 +589,83 @@ export default function App() {
                 {isCapturingSnapshot ? 'Capturing...' : 'Snapshot'}
               </span>
             </button>
+
+            {/* Planet Chronicle & Journal Overlay Button */}
+            <button
+              type="button"
+              onClick={() => {
+                setJournalOpen(true);
+                setUnreadJournalCount(0);
+                setJournalToast(null);
+              }}
+              className="relative flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-xs font-mono-tabular transition-all shadow-lg cursor-pointer bg-[#1e1927]/90 border-white/12 text-white/80 hover:bg-[#2c2438] hover:text-white/100 active:scale-95"
+              title="Open Planet Chronicle & Journal (Press 'J')"
+              aria-label="Open Planet Chronicle & Journal"
+            >
+              <BookOpen className="w-3.5 h-3.5 text-[#fbbf24] shrink-0" />
+              <span className="hidden sm:inline font-sans text-[11px] font-medium text-[#fef3c7]">
+                Journal
+              </span>
+              {unreadJournalCount > 0 && (
+                <span className="flex items-center justify-center min-w-4 h-4 px-1 text-[9px] font-bold rounded-full bg-[#f59e0b] text-[#2f1b04] animate-pulse">
+                  {unreadJournalCount}
+                </span>
+              )}
+            </button>
           </header>
         )}
+
+        {/* Live Milestone Toast Notification */}
+        <AnimatePresence>
+          {journalToast && !journalOpen && (
+            <motion.aside
+              initial={{ opacity: 0, y: -16, scale: 0.95 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -12, scale: 0.95 }}
+              transition={{ type: 'spring', damping: 24, stiffness: 320 }}
+              aria-label="New Journal Milestone Notification"
+              className="absolute top-16 right-4 sm:right-6 z-40 max-w-sm w-full pointer-events-auto"
+            >
+              <div
+                onClick={() => {
+                  setJournalOpen(true);
+                  setUnreadJournalCount(0);
+                  setJournalToast(null);
+                }}
+                role="button"
+                tabIndex={0}
+                className="flex items-start gap-3 p-3.5 rounded-2xl bg-[#2a221b]/95 text-[#fbf7ee] border border-[#f59e0b]/45 shadow-2xl backdrop-blur-md cursor-pointer hover:bg-[#382e25] transition-all"
+              >
+                <div className="w-8 h-8 rounded-xl bg-[#f59e0b]/20 border border-[#f59e0b]/40 text-[#fcd34d] flex items-center justify-center shrink-0">
+                  <BookOpen className="w-4 h-4" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <MilestoneBadge entry={journalToast} size="sm" showSublabel={false} />
+                    <span className="text-[10px] text-[#baa897]">•</span>
+                    <span className="text-[10px] text-[#baa897]">Just now</span>
+                  </div>
+                  <div className="text-xs font-serif font-semibold text-[#fef3c7] truncate mt-0.5">
+                    {journalToast.title}
+                  </div>
+                  <div className="text-[11px] text-[#d1c2b0] line-clamp-1 mt-0.5">
+                    {journalToast.description}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setJournalToast(null);
+                  }}
+                  className="text-[#9e8d7d] hover:text-[#fbf7ee] p-1 cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </motion.aside>
+          )}
+        </AnimatePresence>
 
         {/* WebGL Context Lost Fallback */}
         {webglLost && (
@@ -562,6 +728,25 @@ export default function App() {
             <Camera className="w-4 h-4 shrink-0" />
           </button>
 
+          <button
+            type="button"
+            onClick={() => {
+              setJournalOpen(true);
+              setUnreadJournalCount(0);
+              setJournalToast(null);
+            }}
+            title="Planet Chronicle & Journal (J)"
+            aria-label="Open Planet Journal"
+            className="relative w-11 h-11 shrink-0 flex items-center justify-center rounded-xl border border-[#d8c7ad] bg-[#fbf5eb] text-[#854d0e] hover:bg-[#f6ebd7] active:scale-95 transition-all cursor-pointer"
+          >
+            <BookOpen className="w-4 h-4 shrink-0 text-[#b45309]" />
+            {unreadJournalCount > 0 && (
+              <span className="absolute -top-1 -right-1 min-w-4 h-4 px-1 rounded-full bg-[#f59e0b] text-[#2f1b04] text-[9px] font-bold flex items-center justify-center border border-white animate-pulse">
+                {unreadJournalCount}
+              </span>
+            )}
+          </button>
+
           <div className="w-8 h-px bg-[#e2d7c5] shrink-0" aria-hidden="true" />
 
           <div
@@ -594,19 +779,33 @@ export default function App() {
       )}
 
       {/* Desktop Modal for Filters (Planet Info, Grow & 30s Tour, Camera View, Lighting & Sky) */}
-      {!worldState.tourActive && filtersOpen && (
-        <div className="hidden md:flex fixed inset-0 z-40 items-center justify-center p-4">
-          <div
-            className="absolute inset-0 bg-black/50 backdrop-blur-xs"
-            onClick={() => setFiltersOpen(false)}
-            aria-hidden="true"
-          />
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-label="Filters"
-            className="relative z-10 w-full max-w-sm max-h-[85vh] bg-[#faf5ec] text-[#382f27] rounded-2xl border border-[#e2d7c5] flex flex-col overflow-hidden shadow-2xl"
-          >
+      <AnimatePresence>
+        {!worldState.tourActive && filtersOpen && (
+          <div className="hidden md:flex fixed inset-0 z-40 items-center justify-center p-4 pointer-events-auto">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.22, ease: 'easeOut' }}
+              className="absolute inset-0 bg-black/50 backdrop-blur-xs"
+              onClick={() => setFiltersOpen(false)}
+              aria-hidden="true"
+            />
+            <motion.div
+              role="dialog"
+              aria-modal="true"
+              aria-label="Filters"
+              initial={{ opacity: 0, scale: 0.93, y: 16 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.94, y: 12 }}
+              transition={{
+                type: 'spring',
+                damping: 26,
+                stiffness: 330,
+                mass: 0.85,
+              }}
+              className="relative z-10 w-full max-w-sm max-h-[85vh] bg-[#faf5ec] text-[#382f27] rounded-2xl border border-[#e2d7c5] flex flex-col overflow-hidden shadow-2xl"
+            >
             <div className="px-4 py-3 flex items-center justify-between border-b border-[#e6dccb] shrink-0">
               <h2 className="text-sm font-semibold text-[#2b221b]">Filters</h2>
               <button
@@ -1048,9 +1247,10 @@ export default function App() {
                 </div>
               </section>
             </div>
-          </div>
+          </motion.div>
         </div>
       )}
+    </AnimatePresence>
 
       {/* Mobile Bottom Bar: Filters Button + Scrollable Row of Square Icon-Only Tool Buttons */}
       {!worldState.tourActive && (
@@ -1128,19 +1328,32 @@ export default function App() {
       )}
 
       {/* Mobile Bottom Sheet for Filters (Camera View, Lighting & Sky, World Info & Actions) */}
-      {!worldState.tourActive && filtersOpen && (
-        <div className="md:hidden fixed inset-0 z-40 flex flex-col justify-end">
-          <div
-            className="absolute inset-0 bg-black/50 backdrop-blur-xs"
-            onClick={() => setFiltersOpen(false)}
-            aria-hidden="true"
-          />
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-label="Filters"
-            className="relative z-10 w-full max-h-[80vh] bg-[#faf5ec] text-[#382f27] rounded-t-3xl border-t border-[#e2d7c5] flex flex-col overflow-hidden shadow-2xl"
-          >
+      <AnimatePresence>
+        {!worldState.tourActive && filtersOpen && (
+          <div className="md:hidden fixed inset-0 z-40 flex flex-col justify-end pointer-events-auto">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.22, ease: 'easeOut' }}
+              className="absolute inset-0 bg-black/50 backdrop-blur-xs"
+              onClick={() => setFiltersOpen(false)}
+              aria-hidden="true"
+            />
+            <motion.div
+              role="dialog"
+              aria-modal="true"
+              aria-label="Filters"
+              initial={{ y: '100%' }}
+              animate={{ y: 0 }}
+              exit={{ y: '100%' }}
+              transition={{
+                type: 'spring',
+                damping: 28,
+                stiffness: 310,
+              }}
+              className="relative z-10 w-full max-h-[80vh] bg-[#faf5ec] text-[#382f27] rounded-t-3xl border-t border-[#e2d7c5] flex flex-col overflow-hidden shadow-2xl"
+            >
             <div className="w-10 h-1.5 bg-[#d6c8b4] rounded-full mx-auto mt-3 mb-1 shrink-0" />
             <div className="px-4 py-2.5 flex items-center justify-between border-b border-[#e6dccb] shrink-0">
               <h2 className="text-sm font-semibold text-[#2b221b]">Filters</h2>
@@ -1531,9 +1744,55 @@ export default function App() {
                 </div>
               </section>
             </div>
-          </div>
+          </motion.div>
         </div>
       )}
+    </AnimatePresence>
+
+      {/* Naturalist Archival Journal & Chronicle Overlay */}
+      <JournalOverlay
+        isOpen={journalOpen}
+        onClose={() => setJournalOpen(false)}
+        entries={journalData.entries}
+        stats={journalData.stats}
+        planetName={worldState.planetName}
+        dayCount={worldState.dayCount}
+        timeOfDay={worldState.timeOfDay}
+        season={worldState.season}
+        population={worldState.population}
+        happiness={worldState.happiness}
+        onAddNote={(newEntry) => {
+          const updated = [newEntry, ...journalData.entries];
+          setJournalData((prev) => ({ ...prev, entries: updated }));
+          journalEntriesRef.current = updated;
+          saveJournalData(planetNameRef.current, updated, journalData.stats);
+        }}
+        onDeleteEntry={(id) => {
+          const updated = journalData.entries.filter((e) => e.id !== id);
+          setJournalData((prev) => ({ ...prev, entries: updated }));
+          journalEntriesRef.current = updated;
+          saveJournalData(planetNameRef.current, updated, journalData.stats);
+        }}
+        onImportJournal={(importedEntries, importedStats, importedPlanetName) => {
+          setJournalData({
+            entries: importedEntries,
+            stats: importedStats,
+          });
+          journalEntriesRef.current = importedEntries;
+          journalStatsRef.current = importedStats;
+          saveJournalData(planetNameRef.current, importedEntries, importedStats);
+          if (
+            importedPlanetName &&
+            importedPlanetName.trim() &&
+            importedPlanetName !== 'Imported Planet' &&
+            importedPlanetName !== worldState.planetName
+          ) {
+            setWorldState((prev) => ({ ...prev, planetName: importedPlanetName.trim() }));
+            planetNameRef.current = importedPlanetName.trim();
+          }
+        }}
+        onCaptureSceneSnapshot={handleCaptureSceneSnapshotDataUrl}
+      />
     </div>
   );
 }

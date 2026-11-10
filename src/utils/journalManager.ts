@@ -1,4 +1,9 @@
-import { JournalEntry, JournalStats, SeasonId } from '../types/world';
+import {
+  JournalEntry,
+  JournalExportData,
+  JournalStats,
+  SeasonId,
+} from '../types/world';
 
 const STORAGE_KEY_PREFIX = 'pocket_world_journal_';
 
@@ -50,6 +55,45 @@ function getDefaultStats(): JournalStats {
   };
 }
 
+export function deriveTagsForEntry(entry: Partial<JournalEntry>): string[] {
+  const tags = new Set<string>();
+
+  if (
+    entry.category === 'milestone' ||
+    entry.badge?.toLowerCase().includes('milestone') ||
+    entry.badge?.toLowerCase().includes('genesis') ||
+    entry.badge?.toLowerCase().includes('first snow') ||
+    entry.badge?.toLowerCase().includes('record') ||
+    entry.numericRecord?.type === 'population' ||
+    entry.numericRecord?.type === 'days'
+  ) {
+    tags.add('Milestone');
+  }
+
+  if (
+    entry.category === 'biome' ||
+    entry.badge?.toLowerCase().includes('biome') ||
+    entry.badge?.toLowerCase().includes('unlocked') ||
+    entry.badge?.toLowerCase().includes('wonder') ||
+    entry.title?.toLowerCase().includes('discovered') ||
+    entry.title?.toLowerCase().includes('founding') ||
+    entry.id?.includes('biome-')
+  ) {
+    tags.add('Discovery');
+  }
+
+  if (entry.category === 'record' || entry.numericRecord) {
+    tags.add('Record');
+  }
+
+  if (entry.category === 'note' || entry.isCustomNote) {
+    tags.add('Observation');
+  }
+
+  tags.add('Event');
+  return Array.from(tags);
+}
+
 function getDefaultEntries(planetName: string): JournalEntry[] {
   const now = Date.now();
   return [
@@ -60,6 +104,7 @@ function getDefaultEntries(planetName: string): JournalEntry[] {
       description:
         'A miniature world was brought to life inside the glass terrarium, resting quietly upon its hand-turned walnut windowsill stand.',
       badge: 'Genesis',
+      tags: ['Milestone', 'Event'],
       iconName: 'Sparkles',
       accentColor: '#fbbf24',
       dayCount: 1,
@@ -75,6 +120,7 @@ function getDefaultEntries(planetName: string): JournalEntry[] {
       description:
         'The first pastel cottages were raised with terracotta shingles and soft window sills, welcoming twelve settlers to the planet.',
       badge: 'Hamlet',
+      tags: ['Milestone', 'Discovery', 'Record', 'Event'],
       iconName: 'Home',
       accentColor: '#34d399',
       dayCount: 1,
@@ -94,6 +140,7 @@ function getDefaultEntries(planetName: string): JournalEntry[] {
       description:
         'Ancient oaks, flowering elderberry, and fragrant coastal pines established a thriving verdant canopy across the northern hills.',
       badge: 'Biome Unlocked',
+      tags: ['Discovery', 'Milestone', 'Event'],
       iconName: 'Trees',
       accentColor: '#10b981',
       dayCount: 1,
@@ -115,8 +162,17 @@ export function loadJournalData(planetName: string): {
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed.entries) && parsed.stats) {
+        const normalizedEntries: JournalEntry[] = parsed.entries.map(
+          (e: JournalEntry) => ({
+            ...e,
+            tags:
+              Array.isArray(e.tags) && e.tags.length > 0
+                ? e.tags
+                : deriveTagsForEntry(e),
+          }),
+        );
         return {
-          entries: parsed.entries,
+          entries: normalizedEntries,
           stats: { ...getDefaultStats(), ...parsed.stats },
         };
       }
@@ -171,6 +227,20 @@ export interface MilestoneContext {
 }
 
 export function evaluateMilestone(
+  ctx: MilestoneContext,
+  currentEntries: JournalEntry[],
+  currentStats: JournalStats,
+): { newEntry: JournalEntry; updatedStats: JournalStats } | null {
+  const result = evaluateMilestoneInternal(ctx, currentEntries, currentStats);
+  if (result && result.newEntry) {
+    if (!result.newEntry.tags || result.newEntry.tags.length === 0) {
+      result.newEntry.tags = deriveTagsForEntry(result.newEntry);
+    }
+  }
+  return result;
+}
+
+function evaluateMilestoneInternal(
   ctx: MilestoneContext,
   currentEntries: JournalEntry[],
   currentStats: JournalStats,
@@ -448,6 +518,7 @@ export function createCustomFieldNote(
     title: title.trim() || 'Naturalist Field Observation',
     description: text.trim(),
     badge: 'Field Note',
+    tags: ['Observation', 'Event'],
     iconName: 'BookOpen',
     accentColor: '#d97706',
     dayCount: ctx.dayCount,
@@ -490,4 +561,240 @@ export function exportChronicleMarkdown(
   });
 
   return lines.join('\n');
+}
+
+/**
+ * Generates and downloads a formatted JSON backup of the complete journal and chronicle data.
+ */
+export function exportJournalJSON(
+  planetName: string,
+  entries: JournalEntry[],
+  stats: JournalStats,
+): void {
+  const exportPayload: JournalExportData = {
+    version: 1,
+    app: 'Pocket World Terrarium',
+    exportedAt: new Date().toISOString(),
+    planetName: planetName || 'Little Meadow',
+    entries,
+    stats,
+  };
+
+  const jsonString = JSON.stringify(exportPayload, null, 2);
+  const blob = new Blob([jsonString], { type: 'application/json;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  const safeName = sanitizeKey(planetName);
+  const dateStr = new Date().toISOString().slice(0, 10);
+  anchor.href = url;
+  anchor.download = `${safeName}_journal_${dateStr}.json`;
+  document.body.appendChild(anchor);
+  anchor.click();
+  document.body.removeChild(anchor);
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+/**
+ * Validates and parses imported JSON string, safely normalizing journal entries and stats.
+ */
+export function parseAndValidateJournalJSON(
+  rawJson: string,
+): { success: true; data: JournalExportData } | { success: false; error: string } {
+  try {
+    if (!rawJson || typeof rawJson !== 'string') {
+      return { success: false, error: 'Empty or invalid file content.' };
+    }
+
+    const parsed = JSON.parse(rawJson);
+
+    let rawEntries: unknown[] = [];
+    let rawStats: Partial<JournalStats> = {};
+    let planetName = 'Imported Planet';
+
+    if (Array.isArray(parsed)) {
+      rawEntries = parsed;
+    } else if (parsed && typeof parsed === 'object') {
+      if (Array.isArray(parsed.entries)) {
+        rawEntries = parsed.entries;
+      } else {
+        return { success: false, error: 'JSON does not contain a valid "entries" list.' };
+      }
+      if (parsed.stats && typeof parsed.stats === 'object') {
+        rawStats = parsed.stats;
+      }
+      if (typeof parsed.planetName === 'string' && parsed.planetName.trim()) {
+        planetName = parsed.planetName.trim();
+      }
+    } else {
+      return { success: false, error: 'Unrecognized JSON format.' };
+    }
+
+    if (rawEntries.length === 0) {
+      return { success: false, error: 'The imported file contains no journal entries.' };
+    }
+
+    const sanitizedEntries: JournalEntry[] = [];
+    for (let i = 0; i < rawEntries.length; i++) {
+      const item = rawEntries[i];
+      if (!item || typeof item !== 'object') continue;
+
+      const obj = item as Record<string, unknown>;
+      const id = typeof obj.id === 'string' && obj.id ? obj.id : `imported-${Date.now()}-${i}`;
+      const title = typeof obj.title === 'string' && obj.title ? obj.title : 'Historical Event';
+      const description = typeof obj.description === 'string' ? obj.description : '';
+      const category = (
+        ['milestone', 'biome', 'weather', 'village', 'record', 'note'].includes(
+          obj.category as string,
+        )
+          ? obj.category
+          : 'milestone'
+      ) as JournalEntry['category'];
+      const badge = typeof obj.badge === 'string' ? obj.badge : 'Milestone';
+      const iconName = typeof obj.iconName === 'string' ? obj.iconName : 'Sparkles';
+      const accentColor = typeof obj.accentColor === 'string' ? obj.accentColor : '#f59e0b';
+      const dayCount = typeof obj.dayCount === 'number' && !isNaN(obj.dayCount) ? obj.dayCount : 1;
+      const timeOfDayLabel =
+        typeof obj.timeOfDayLabel === 'string' ? obj.timeOfDayLabel : 'Morning';
+      const season = (
+        ['spring', 'summer', 'autumn', 'winter'].includes(obj.season as string)
+          ? obj.season
+          : 'spring'
+      ) as SeasonId;
+      const createdAt =
+        typeof obj.createdAt === 'number' && !isNaN(obj.createdAt)
+          ? obj.createdAt
+          : Date.now() - (rawEntries.length - i) * 60000;
+      const realTimestamp =
+        typeof obj.realTimestamp === 'string'
+          ? obj.realTimestamp
+          : formatRealTime(createdAt);
+
+      const entry: JournalEntry = {
+        id,
+        category,
+        title,
+        description,
+        badge,
+        iconName,
+        accentColor,
+        dayCount,
+        timeOfDayLabel,
+        season,
+        realTimestamp,
+        createdAt,
+      };
+
+      if (obj.numericRecord && typeof obj.numericRecord === 'object') {
+        const nr = obj.numericRecord as Record<string, unknown>;
+        if (
+          typeof nr.type === 'string' &&
+          typeof nr.value === 'number' &&
+          !isNaN(nr.value)
+        ) {
+          entry.numericRecord = {
+            type: nr.type as 'population' | 'happiness' | 'days' | 'trees' | 'houses',
+            value: nr.value,
+            prevValue: typeof nr.prevValue === 'number' ? nr.prevValue : undefined,
+          };
+        }
+      }
+
+      if (obj.isCustomNote === true) {
+        entry.isCustomNote = true;
+      }
+
+      const tags =
+        Array.isArray(obj.tags) && obj.tags.length > 0
+          ? (obj.tags as unknown[])
+              .filter((t): t is string => typeof t === 'string' && t.trim().length > 0)
+              .map((t) => t.trim())
+          : deriveTagsForEntry({ category, badge, title, numericRecord: entry.numericRecord });
+
+      entry.tags = tags;
+
+      sanitizedEntries.push(entry);
+    }
+
+    if (sanitizedEntries.length === 0) {
+      return { success: false, error: 'Could not parse any valid journal entries from file.' };
+    }
+
+    const defaultStats = getDefaultStats();
+    const validatedStats: JournalStats = {
+      peakPopulation:
+        typeof rawStats.peakPopulation === 'number'
+          ? rawStats.peakPopulation
+          : defaultStats.peakPopulation,
+      peakHappiness:
+        typeof rawStats.peakHappiness === 'number'
+          ? rawStats.peakHappiness
+          : defaultStats.peakHappiness,
+      totalDays:
+        typeof rawStats.totalDays === 'number'
+          ? rawStats.totalDays
+          : defaultStats.totalDays,
+      biomesDiscovered: Array.isArray(rawStats.biomesDiscovered)
+        ? rawStats.biomesDiscovered.filter((b): b is string => typeof b === 'string')
+        : defaultStats.biomesDiscovered,
+      firstSnowRecorded: !!rawStats.firstSnowRecorded,
+      firstRainbowRecorded: !!rawStats.firstRainbowRecorded,
+      firstNightfallRecorded: !!rawStats.firstNightfallRecorded,
+      firstSnapshotRecorded: !!rawStats.firstSnapshotRecorded,
+      firstCelestialTransitionRecorded: !!rawStats.firstCelestialTransitionRecorded,
+    };
+
+    return {
+      success: true,
+      data: {
+        version: 1,
+        app: 'Pocket World Terrarium',
+        exportedAt: new Date().toISOString(),
+        planetName,
+        entries: sanitizedEntries,
+        stats: validatedStats,
+      },
+    };
+  } catch (err) {
+    return {
+      success: false,
+      error: `Failed to parse JSON file: ${err instanceof Error ? err.message : 'Syntax error'}`,
+    };
+  }
+}
+
+/**
+ * Combines existing and imported entries, avoiding duplicates by unique ID.
+ */
+export function mergeJournalEntries(
+  existing: JournalEntry[],
+  imported: JournalEntry[],
+): JournalEntry[] {
+  const map = new Map<string, JournalEntry>();
+  existing.forEach((e) => map.set(e.id, e));
+  imported.forEach((e) => map.set(e.id, e));
+  return Array.from(map.values()).sort((a, b) => b.createdAt - a.createdAt);
+}
+
+/**
+ * Merges planetary records and stats conservatively preserving the highest achieved milestones.
+ */
+export function mergeJournalStats(
+  existing: JournalStats,
+  imported: Partial<JournalStats> | undefined,
+): JournalStats {
+  if (!imported) return existing;
+  return {
+    peakPopulation: Math.max(existing.peakPopulation, imported.peakPopulation ?? 0),
+    peakHappiness: Math.max(existing.peakHappiness, imported.peakHappiness ?? 0),
+    totalDays: Math.max(existing.totalDays, imported.totalDays ?? 1),
+    biomesDiscovered: Array.from(
+      new Set([...existing.biomesDiscovered, ...(imported.biomesDiscovered ?? [])]),
+    ),
+    firstSnowRecorded: existing.firstSnowRecorded || !!imported.firstSnowRecorded,
+    firstRainbowRecorded: existing.firstRainbowRecorded || !!imported.firstRainbowRecorded,
+    firstNightfallRecorded: existing.firstNightfallRecorded || !!imported.firstNightfallRecorded,
+    firstSnapshotRecorded: existing.firstSnapshotRecorded || !!imported.firstSnapshotRecorded,
+    firstCelestialTransitionRecorded:
+      existing.firstCelestialTransitionRecorded || !!imported.firstCelestialTransitionRecorded,
+  };
 }
