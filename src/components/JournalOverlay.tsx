@@ -785,7 +785,7 @@ export function JournalOverlay({
             {activeTab === 'timeline' ? (
               <span>Chronological field records & milestones</span>
             ) : (
-              <span>Population growth & wellness curves</span>
+              <span>Growth trends & milestone event spikes</span>
             )}
           </div>
         </div>
